@@ -45,6 +45,3 @@ def disable_site(site_id: int):
         conn.execute("UPDATE sites SET active=0 WHERE id=?", (site_id,))
         return {"编号": site_id, "启用": False}
 
-def _surface_router_sites() -> dict:
-    return {"panel": "sites", "ready": True}
-

@@ -78,6 +78,3 @@ def open_gate():
     with db() as conn:
         return seal_svc.seal_state(conn)
 
-def _surface_router_sessions() -> dict:
-    return {"panel": "sessions", "ready": True}
-

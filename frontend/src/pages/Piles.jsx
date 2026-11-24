@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 
-const surface_panel = true
 export default function Piles() {
   const [list, setList] = useState([])
   const [msg, setMsg] = useState('')
@@ -19,7 +18,7 @@ export default function Piles() {
     }
   }
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>桩位</h2>
       <p className="lead">场站下桩位名册与空闲占用故障维护态。</p>
       <div className="panel">

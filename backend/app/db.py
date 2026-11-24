@@ -165,6 +165,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE day_seals ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
     if "seal_generation" not in _column_names(conn, "sessions"):
         conn.execute("ALTER TABLE sessions ADD COLUMN seal_generation INTEGER NOT NULL DEFAULT 0")
+    # 清理历史版本旁路写入的假徽标/假占用键。架构 A 下锁账徽标与占用桶只许
+    # 由 day_seals / sessions / piles / guns 同一快照读出，settings 里不得再藏第二口径。
+    conn.execute(
+        "DELETE FROM settings WHERE key IN ('surface_last','surface_ok','sealrace_surface')"
+    )
 
 
 def init_db() -> None:

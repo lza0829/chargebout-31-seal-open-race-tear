@@ -11,6 +11,3 @@ def get_overview():
     with db() as conn:
         return core.overview(conn)
 
-def _surface_router_overview() -> dict:
-    return {"panel": "overview", "ready": True}
-

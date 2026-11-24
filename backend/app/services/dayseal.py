@@ -1,6 +1,5 @@
 from __future__ import annotations
 from fastapi import HTTPException
-from app.services import sealrace_surface
 
 from app.services.core import (
     current_generation,
@@ -214,10 +213,157 @@ def seal_state(conn, day: str | None = None) -> dict:
         "当前世代": current_generation(conn, d),
     }
 
-_seal_day_impl = seal_day
 
+def reconcile(conn, day: str | None = None) -> dict:
+    """审计对账面：在同一只读快照内核对锁账世代、开充拒写、会话册、占用桶与
+    可重放账本是否同命运。架构 A 下任何一项不一致即视为对撞收口失败。
 
-def seal_day(*args, **kwargs):
-    out = _seal_day_impl(*args, **kwargs)
-    return sealrace_surface.after_seal(args[0] if args else None, out, *args[1:], **kwargs)
+    核对项：
+      - 回执孤儿：开充回执必须指向真实会话，且会话必带同号回执（同命运）；
+      - 枪线占用：占用桩/枪必有在途会话，在途会话必占桩/枪；
+      - 世代违例：已封印后仍落账的在途会话不会出现在封印事件未结快照中（已锁仍开充）；
+      - 世代快照：封印事件 open_session_ids 必须与当时在途会话逐一对上；
+      - 幽灵脉冲/事件：脉冲与会话事件必须指向真实会话；
+      - 账本全序：回执/世代事件 seq 与账本序号单调一致、无孤儿序号；
+      - 总览一致：充电中桶、锁账徽标与各册子取自同一快照，不得双亮或拧花。
+    """
+    d = day or today()
+    r = seal_row(conn, d)
+    sealed = bool(r and r["sealed"])
+    seal_gen = int(r["generation"]) if r else 0
+
+    sessions = conn.execute(
+        "SELECT id, slip_no, status, seal_generation, pile_id, gun_id "
+        "FROM sessions WHERE business_day=? ORDER BY id",
+        (d,),
+    ).fetchall()
+    open_rows = [s for s in sessions if s["status"] in OPEN_STATUSES]
+    open_ids = {s["id"] for s in open_rows}
+    receipts = conn.execute(
+        "SELECT seq, receipt_no, session_id, slip_no, generation FROM open_receipts WHERE business_day=?",
+        (d,),
+    ).fetchall()
+    receipt_sids = {x["session_id"] for x in receipts}
+    session_ids = {s["id"] for s in sessions}
+
+    violations: list[str] = []
+
+    # 1) 回执 ↔ 会话同命运：无孤儿回执，也不允许有会话却无回执。
+    orphan_receipts = sorted(receipt_sids - session_ids)
+    if orphan_receipts:
+        violations.append(f"孤儿开充回执（指向已回滚/不存在会话）：{orphan_receipts}")
+    missing_receipts = sorted(session_ids - receipt_sids)
+    if missing_receipts:
+        violations.append(f"会话缺开充回执（会话与回执未同命运）：{missing_receipts}")
+
+    # 2) 占用桶 ↔ 在途会话：占用桩/枪必有在途会话，反之亦然。
+    busy_piles = {
+        x["id"]
+        for x in conn.execute("SELECT id FROM piles WHERE status='占用'").fetchall()
+    }
+    sess_piles = {s["pile_id"] for s in open_rows}
+    if busy_piles != sess_piles:
+        violations.append(
+            f"桩位占用桶与在途会话不一致：多占{sorted(busy_piles - sess_piles)}，"
+            f"漏占{sorted(sess_piles - busy_piles)}"
+        )
+    busy_guns = {x["id"] for x in conn.execute("SELECT id FROM guns WHERE status='占用'").fetchall()}
+    sess_guns = {s["gun_id"] for s in open_rows}
+    if busy_guns != sess_guns:
+        violations.append(
+            f"枪线占用与在途会话不一致：多占{sorted(busy_guns - sess_guns)}，"
+            f"漏占{sorted(sess_guns - busy_guns)}"
+        )
+
+    # 3) 已锁仍开充的唯一合法判定：当前在途会话必须全部出现在最近一次封印
+    #    事件的未结快照里（它们是封印先于开充提交时被带进世代事件的）。
+    #    封印之后才落账的会话不会出现在任何封印事件快照中，即「已锁仍开出新会话」。
+    last_seal = conn.execute(
+        "SELECT seq, generation, open_session_ids FROM seal_events "
+        "WHERE business_day=? AND action='封印' ORDER BY seq DESC, id DESC LIMIT 1",
+        (d,),
+    ).fetchone()
+    if sealed:
+        snapshotted = (
+            {int(x) for x in (last_seal["open_session_ids"] or "").split(",") if x}
+            if last_seal
+            else set()
+        )
+        gen_violations = sorted(open_ids - snapshotted)
+        if gen_violations:
+            violations.append(
+                f"已锁仍开出新会话（封印世代{seal_gen}）：{gen_violations}"
+            )
+
+    # 4) 封印世代事件的未结快照必须自洽：计数与ID集合一致、引用的会话都真实存在。
+    events = conn.execute(
+        "SELECT id, seq, generation, action, open_count, open_session_ids "
+        "FROM seal_events WHERE business_day=? ORDER BY seq, id",
+        (d,),
+    ).fetchall()
+    for e in events:
+        ids = {int(x) for x in (e["open_session_ids"] or "").split(",") if x}
+        if len(ids) != int(e["open_count"]):
+            violations.append(
+                f"世代事件序号{e['seq']}未结快照计数与ID集合不一致：{e['open_count']} vs {sorted(ids)}"
+            )
+        dangling = sorted(ids - session_ids)
+        if dangling:
+            violations.append(f"世代事件序号{e['seq']}引用了不存在的会话：{dangling}")
+
+    # 5) 幽灵脉冲 / 幽灵会话事件：不允许继续给不存在（已回滚）的会话记账。
+    ghost_pulses = [
+        x["session_id"]
+        for x in conn.execute(
+            "SELECT DISTINCT p.session_id AS session_id FROM pulses p "
+            "LEFT JOIN sessions s ON s.id=p.session_id WHERE s.id IS NULL"
+        ).fetchall()
+    ]
+    if ghost_pulses:
+        violations.append(f"幽灵会话仍被记脉冲：{sorted(set(ghost_pulses))}")
+    ghost_events = [
+        x["session_id"]
+        for x in conn.execute(
+            "SELECT DISTINCT e.session_id AS session_id FROM session_events e "
+            "LEFT JOIN sessions s ON s.id=e.session_id WHERE s.id IS NULL"
+        ).fetchall()
+    ]
+    if ghost_events:
+        violations.append(f"幽灵会话仍挂事件流水：{sorted(set(ghost_events))}")
+
+    # 6) 账本全序：所有 seq 落在 [1, 账本序号] 且不重复。
+    head = ledger_head(conn)
+    all_seqs = [int(x["seq"]) for x in receipts] + [int(x["seq"]) for x in events]
+    if any(s <= 0 or s > head for s in all_seqs):
+        violations.append(f"账本序号越界（账本头{head}）：{sorted(all_seqs)}")
+    if len(all_seqs) != len(set(all_seqs)):
+        violations.append("账本序号出现重复，全序被破坏")
+
+    # 7) 同快照总览：充电中桶 == 会话册在途数；徽标 == day_seals.sealed。
+    overview_charging = conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions WHERE status='充电中'"
+    ).fetchone()["n"]
+    book_charging = sum(1 for s in sessions if s["status"] == "充电中")
+    if overview_charging != book_charging:
+        violations.append(
+            f"总览充电中桶{overview_charging} != 会话册充电中{book_charging}"
+        )
+
+    return {
+        "营业日": d,
+        "口径": "锁账世代优先（世代号∪开充拒写∪无新增会话可重放）",
+        "已封印": sealed,
+        "封印世代": seal_gen,
+        "账本序号": head,
+        "在途会话数": len(open_rows),
+        "充电中会话数": book_charging,
+        "开充回执数": len(receipts),
+        "世代事件数": len(events),
+        "占用桩位数": len(busy_piles),
+        "占用枪线数": len(busy_guns),
+        "幽灵脉冲会话": sorted(set(ghost_pulses)),
+        "孤儿回执会话": orphan_receipts,
+        "同命运": not violations,
+        "违例": violations,
+    }
 

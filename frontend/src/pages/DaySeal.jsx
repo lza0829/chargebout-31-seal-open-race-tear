@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 
-const surface_panel = true
 export default function DaySeal() {
   const [d, setD] = useState(null)
   const [hist, setHist] = useState([])
@@ -58,7 +57,7 @@ export default function DaySeal() {
 
   if (!d) return null
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>充日封印</h2>
       <p className="lead">
         锁账世代优先：封印提交后，任何并发开充整笔让路——不留会话、不动占用、不推进序号、不落回执。

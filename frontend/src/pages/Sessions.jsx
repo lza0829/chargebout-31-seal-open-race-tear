@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 
-const surface_panel = true
 export default function Sessions() {
   const [list, setList] = useState([])
   const [detail, setDetail] = useState(null)
@@ -9,7 +8,7 @@ export default function Sessions() {
     api.会话().then(setList)
   }, [])
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>会话册</h2>
       <p className="lead">最近会话列表；点开可看脉冲与事件流水。</p>
       <div className="panel">

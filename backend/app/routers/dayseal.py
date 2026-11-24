@@ -61,6 +61,10 @@ def gate():
     with db() as conn:
         return svc.seal_state(conn)
 
-def _surface_router_dayseal() -> dict:
-    return {"panel": "dayseal", "ready": True}
+
+@router.get("/充日/对账")
+def reconcile():
+    """审计对账面：世代/开充拒写/会话册/占用桶/账本在同一快照内同命运核对。"""
+    with db() as conn:
+        return svc.reconcile(conn)
 

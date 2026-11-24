@@ -45,6 +45,3 @@ def change_status(pile_id: int, body: PileStatusIn):
     with db(immediate=True) as conn:
         return set_pile_status(conn, pile_id, body.状态)
 
-def _surface_router_piles() -> dict:
-    return {"panel": "piles", "ready": True}
-
